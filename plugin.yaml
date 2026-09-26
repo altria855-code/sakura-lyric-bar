@@ -1,0 +1,20 @@
+api: 4
+id: local.sakura.lyric-bar
+name: 字幕栏
+author: 用户
+description: 桌面浮窗显示角色台词的当前句高亮,可拖动、可调外观,鼠标悬停即可打字发送。
+version: 1.0.0
+entry: plugin:LyricBarPlugin
+enabled: false
+priority: 100
+presentation:
+  kind: extension
+  category: other
+  icon: messages-square
+provides: []
+requires:
+  - sakura.host.logging
+  - sakura.host.settings
+  - sakura.host.timeline
+  - sakura.host.mobile
+  - sakura.host.character
