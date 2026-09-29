@@ -121,8 +121,9 @@ class ViewState:
             self.notice,
         )
 
-    def boxes(self, width: int) -> layout.LayoutBoxes:
-        return layout.compute_layout(self.lines(), self.theme_values, width)
+    def boxes(self, width: int, measure: Any = None) -> layout.LayoutBoxes:
+        """算布局。`measure(text, max_width) -> 高度` 由渲染方注入,用来算折行后的真实行高。"""
+        return layout.compute_layout(self.lines(), self.theme_values, width, measure)
 
     def highlight_box(self, boxes: layout.LayoutBoxes) -> layout.LineBox | None:
         if self.current_segment < 0:

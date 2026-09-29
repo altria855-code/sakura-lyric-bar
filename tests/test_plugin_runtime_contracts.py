@@ -230,7 +230,8 @@ class ContractThreeTests(_RuntimeCase):
         runtime.start()
         runtime.timeline.entries = [_assistant([_segment("一"), _segment("二")])]
         runtime.on_host_event(CHAT_COMPLETED, {"characterId": "tian", "turnId": "t1", "cursor": "c9"})
-        runtime.on_host_event(TTS_STARTED, {"outcome": "started"})  # 真正推进:推一次
+        runtime.on_host_event(TTS_STARTED, {"outcome": "started"})  # 第 0 句在播:已在 0,不推
+        runtime.on_host_event(TTS_STARTED, {"outcome": "started"})  # 第 1 句在播:真正推进,推一次
         self.assertEqual(runtime.overlay.sent[-1], {"type": "current", "index": 1})
 
         sent = list(runtime.overlay.sent)

@@ -129,6 +129,10 @@ class RuntimeTests(unittest.TestCase):
              "payload": {"segments": [{"text": "一", "translation": ""}, {"text": "二", "translation": ""}]}},
         ]
         runtime.on_host_event("sakura.host.chat.completed", {"characterId": "tian", "turnId": "t1", "cursor": "c9"})
+        # 第 1 个 started = 第 0 句开始播放:高亮已经在第 0 句,不该推消息
+        runtime.on_host_event("sakura.host.tts.started", {"outcome": "started"})
+        self.assertNotEqual(runtime.overlay.sent[-1]["type"], "current")
+        # 第 2 个 started = 第 1 句开始播放
         runtime.on_host_event("sakura.host.tts.started", {"outcome": "started"})
         self.assertEqual(runtime.overlay.sent[-1], {"type": "current", "index": 1})
 

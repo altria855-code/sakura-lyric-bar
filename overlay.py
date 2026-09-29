@@ -65,7 +65,7 @@ def _selftest() -> int:
 
     state = view.ViewState({})
     state.set_reply(DEMO_SEGMENTS)
-    boxes = state.boxes(460)
+    boxes = state.boxes(460, canvas.theme_measure(state.theme_values))
     assert boxes.boxes, "演示台词应产生布局行"
     assert state.highlight_box(boxes) is not None or state.current_segment < 0
     # 栏高上限 = 最多显示行数 × 行高
@@ -82,7 +82,9 @@ def _render_sample(path: str) -> int:
     state = view.ViewState(theme.default_theme())
     state.set_reply(DEMO_SEGMENTS)
     state.set_current(1)
-    boxes = state.boxes(int(state.theme_values["width"]))
+    boxes = state.boxes(
+        int(state.theme_values["width"]), canvas.theme_measure(state.theme_values)
+    )
     buffer = compose.new_buffer(int(state.theme_values["width"]), boxes.view_height + 40)
     painter = canvas.CanvasWindow.paint_into  # 与窗口 render() 共用同一条绘制路径
     painter(buffer, state, boxes, 0)

@@ -11,17 +11,25 @@ class TtsModeTests(unittest.TestCase):
         tracker = highlight.HighlightTracker("tts")
         self.assertEqual(tracker.begin_turn(4, 0.0, SEGMENTS), 0)
 
-    def test_each_started_advances_one(self):
+    def test_each_started_marks_the_segment_now_playing(self):
+        """第 N 个 started 表示「第 N-1 句开始播放」—— 高亮要停在正在播的那句上,不能超前。"""
         tracker = highlight.HighlightTracker("tts")
         tracker.begin_turn(4, 0.0, SEGMENTS)
-        self.assertEqual(tracker.on_tts_started("started", 1.0), 1)
-        self.assertEqual(tracker.on_tts_started("started", 2.0), 2)
+        # 第 1 个 started = 第 0 句开始播放;begin_turn 已经把高亮放在第 0 句,不该再动
+        self.assertIsNone(tracker.on_tts_started("started", 1.0))
+        # 第 2 个 started = 第 1 句开始播放
+        self.assertEqual(tracker.on_tts_started("started", 2.0), 1)
+        # 第 3 个 started = 第 2 句开始播放
+        self.assertEqual(tracker.on_tts_started("started", 3.0), 2)
 
     def test_advance_stops_at_last_segment(self):
         tracker = highlight.HighlightTracker("tts")
         tracker.begin_turn(2, 0.0, SEGMENTS)
-        tracker.on_tts_started("started", 1.0)
-        self.assertIsNone(tracker.on_tts_started("started", 2.0))
+        # 第 1 个 started = 第 0 句(还在第 0 句上,不动)
+        self.assertIsNone(tracker.on_tts_started("started", 1.0))
+        # 第 2 个 started = 第 1 句(最后一句)
+        self.assertEqual(tracker.on_tts_started("started", 2.0), 1)
+        # 之后不再推进
         self.assertIsNone(tracker.on_tts_started("started", 3.0))
 
     def test_stopped_does_not_advance(self):
@@ -69,7 +77,9 @@ class TurnResetTests(unittest.TestCase):
         for now in (0.5, 1.5, 2.5):
             tracker.on_tts_started("started", now)
         self.assertEqual(tracker.begin_turn(4, 10.0, SEGMENTS), 0)
-        self.assertEqual(tracker.on_tts_started("started", 10.5), 1)
+        # 第 2 回合第 1 个 started = 第 0 句在播:已经在第 0 句,不动
+        # (若计数没重置,这里会算到末句)
+        self.assertIsNone(tracker.on_tts_started("started", 10.5))
 
 
 class FallbackTests(unittest.TestCase):
@@ -88,17 +98,17 @@ class FallbackTests(unittest.TestCase):
         tracker.on_tts_started("started", 1.0)
         self.assertIsNone(tracker.poll(100.0))
 
-    def test_late_first_started_does_not_double_advance(self):
-        # 宿主首个 started 迟到(本地 TTS 首次合成可能慢)时,退化路径已经推进过;
-        # 迟到的 started 不能让它再跳一句 —— 否则高亮**永久超前**、前几句从未被高亮,
-        # 并提前收尾(实测修复前:4 句 + 4 个 started 只得 [2, 3, None, None])。
+    def test_late_first_started_realigns_to_the_event_count(self):
+        # 宿主首个 started 迟到(本地 TTS 首次合成可能慢)时,退化路径已经猜着推进过;
+        # 真事件到达后必须以**事件计数**为准重新对齐 —— 否则高亮永久超前、
+        # 前几句从未被高亮,并提前收尾(实测修复前:4 句 + 4 个 started 只得 [2,3,None,None])。
         tracker = highlight.HighlightTracker("tts")
         tracker.begin_turn(4, 0.0, SEGMENTS)
-        self.assertEqual(tracker.poll(5.1), 1)
-        self.assertIsNone(tracker.on_tts_started("started", 5.3))
-        self.assertEqual(tracker.on_tts_started("started", 6.0), 2)
-        self.assertEqual(tracker.on_tts_started("started", 7.0), 3)
-        self.assertIsNone(tracker.on_tts_started("started", 8.0))
+        self.assertEqual(tracker.poll(5.1), 1)                        # 退化:猜着走到第 1 句
+        self.assertEqual(tracker.on_tts_started("started", 5.3), 0)   # 真事件:第 0 句在播 → 拉回 0
+        self.assertEqual(tracker.on_tts_started("started", 6.0), 1)
+        self.assertEqual(tracker.on_tts_started("started", 7.0), 2)
+        self.assertEqual(tracker.on_tts_started("started", 8.0), 3)
 
 
 class OffModeTests(unittest.TestCase):

@@ -60,11 +60,16 @@ class HighlightTracker:
         self._last_activity = now
         self._saw_tts = True
         # 以**累计 started 次数**为准定位,而不是"在当前值上 +1"。
-        # 原因:如果宿主首个 started 迟到超过 TTS_FALLBACK_SECONDS(本地 TTS 首次合成
-        # 可能慢),退化路径已经推进过若干句;此时再 +1 会让高亮**永久超前**,
-        # 表现为前几句从未高亮、且提前收尾(实测 4 句 + 4 个 started 只得 [2,3,None,None])。
+        #
+        # 两个坑都在这一行里:
+        # 1) 第 N 个 started 的含义是「第 N-1 句**开始播放**」—— 所以要减 1。
+        #    不减 1 的话高亮会永远比朗读**超前一句**(第 0 句在播时高亮第 1 句)。
+        # 2) 不用"在当前值上 +1":宿主首个 started 若迟到超过 TTS_FALLBACK_SECONDS
+        #    (本地 TTS 首次合成可能慢),退化路径已经推进过若干句,再 +1 会让高亮
+        #    永久超前、前几句从未高亮且提前收尾(实测 4 句 + 4 个 started 只得
+        #    [2,3,None,None])。以计数为准时,迟到的那个 started 会被算回到正确位置。
         self._started_count += 1
-        target = min(self._started_count, self._count - 1)
+        target = min(self._started_count - 1, self._count - 1)
         if target == self._index:
             return None
         self._index = target
