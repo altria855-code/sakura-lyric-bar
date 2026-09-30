@@ -406,5 +406,109 @@ class DragTests(unittest.TestCase):
         self.assertEqual(state["pos"], kept, "拖动结束后鼠标移动不该再搬窗口")
 
 
+class HighlightTextColorTests(unittest.TestCase):
+    """当前句的高亮**文字色**必须落在它实际显示出来的行上。
+
+    背景高亮(highlightBackground)可以留空 —— 那时文字色就是唯一的高亮提示。
+    所以三种显示模式都必须能看见高亮色;只中文模式下没有原文行,高亮色必须落到译文行。
+    """
+
+    HIGHLIGHT_COLOR = "#FFFF0000"  # 纯红:与白字(#FFFFFF)、灰字(#CFCFCF)一眼分开
+
+    def _reddish(self, buffer):
+        count = 0
+        for index in range(0, len(buffer.data), 4):
+            blue, green, red, alpha = buffer.data[index:index + 4]
+            if alpha > 40 and red > green + 40 and red > blue + 40:
+                count += 1
+        return count
+
+    def _paint_mode(self, mode):
+        values = _theme(
+            mode=mode,
+            highlightColor=self.HIGHLIGHT_COLOR,
+            textColor="#FFFFFF",
+            translationColor="#CFCFCF",
+            backgroundOpacity=100,
+            overallOpacity=100,
+        )
+        state = view.ViewState(values)
+        state.set_reply(SEGMENTS)
+        state.set_current(0)
+        buffer, _boxes = _paint(state)
+        return buffer
+
+    def test_bilingual_highlights_a_line(self):
+        self.assertGreater(self._reddish(self._paint_mode("bilingual")), 0)
+
+    def test_translation_only_mode_still_highlights(self):
+        # 只中文:画面上没有原文行,高亮色必须落到译文行,否则用户完全看不到高亮
+        self.assertGreater(
+            self._reddish(self._paint_mode("zh")), 0,
+            "只显示译文时没有任何高亮色 —— 当前句的高亮完全失效",
+        )
+
+    def test_source_only_mode_highlights(self):
+        self.assertGreater(self._reddish(self._paint_mode("ja")), 0)
+
+
+class RenderUsesFontMetricsTests(unittest.TestCase):
+    """`render` 必须把字体度量交给布局,并按**实测折行高度**排版。
+
+    否则长台词折行后仍然只占一个固定行高:多出来的行压到下一句身上、或被栏底裁掉。
+    """
+
+    LONG = "很长很长的一句中文台词,用来测试折行后的高度会不会被正确算进布局,这条应该会折好几行。"
+
+    def test_render_measures_wrapped_line_height(self):
+        values = _theme(mode="zh", width=300, fontSize=18, maxLines=20)
+        state = view.ViewState(values)
+        state.set_reply([{"text": "", "translation": self.LONG}])
+        window = canvas.CanvasWindow(values)
+        window._hwnd = 1  # 测试替身:只为让 render 不早退,窗口本身由下面几个 mock 顶掉
+        captured = {}
+
+        def capture(_buffer, _view, boxes, _offset):
+            captured["boxes"] = boxes
+
+        with mock.patch.object(canvas.CanvasWindow, "_resize"), \
+                mock.patch.object(canvas.CanvasWindow, "_upload"), \
+                mock.patch.object(canvas.CanvasWindow, "_apply_visibility"), \
+                mock.patch.object(canvas.CanvasWindow, "paint_into", staticmethod(capture)):
+            window.render(state)
+
+        boxes = captured["boxes"]
+        self.assertGreater(
+            boxes.boxes[0].height, boxes.line_height,
+            "render 没把字体度量接进布局:长台词折行后仍按固定行高排版",
+        )
+        self.assertGreaterEqual(boxes.view_height, boxes.boxes[0].height)
+
+    def test_empty_bar_strip_is_tall_enough_to_grab(self):
+        """空栏(刚启动 / 换角色后)收起的细条是唯一的拖拽把手 —— 不能细到抓不住。"""
+        values = _theme(mode="zh", width=460, idleCollapse=True)
+        state = view.ViewState(values)  # 完全没有内容
+        window = canvas.CanvasWindow(values)
+        window._hwnd = 1
+        heights = []
+
+        with mock.patch.object(canvas.CanvasWindow, "_resize",
+                               lambda self, w, h: heights.append(h)), \
+                mock.patch.object(canvas.CanvasWindow, "_upload"), \
+                mock.patch.object(canvas.CanvasWindow, "_apply_visibility"), \
+                mock.patch.object(canvas.CanvasWindow, "paint_into", staticmethod(lambda *a: None)):
+            window.render(state)
+
+        self.assertTrue(heights, "空栏时应该仍然渲染出那条细条")
+        self.assertGreaterEqual(heights[0], 12, "空栏细条太细,鼠标抓不住")
+
+    def test_short_line_keeps_one_line_height(self):
+        values = _theme(mode="zh", width=460, fontSize=18, maxLines=20)
+        state = view.ViewState(values)
+        state.set_reply([{"text": "", "translation": "短句"}])
+        boxes = state.boxes(460, canvas.theme_measure(values))
+        self.assertLessEqual(boxes.boxes[0].height, boxes.line_height)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,10 @@ WINDOW_CLASS_NAME = "SakuraLyricBarCanvas"
 # 内边距由画布添加(layout 只输出紧贴文字的盒子)。纵向 20 + 20 即 `view_height + 40`。
 PADDING_X = 16
 PADDING_Y = 20
-COLLAPSED_HEIGHT = 6  # 空状态细条高度
+# 空状态细条高度。原来是 6px —— 但空栏时这条细条是用户**唯一**的拖拽把手
+# (刚启动、换角色之后栏里都没有内容),6px 太细抓不住。16px 仍然不占地方,
+# 但鼠标能稳稳按住拖动。
+COLLAPSED_HEIGHT = 16
 BAR_BOTTOM_MARGIN = 80  # 默认位置:工作区底边往上留出的余量(够放下方的输入框)
 
 SHADOW_OFFSETS = ((1, 1), (1, 2))
@@ -57,6 +60,8 @@ _class_registered = False
 _windows: dict[int, "CanvasWindow"] = {}
 _shared_raster: raster.Raster | None = None
 _background_cache: "OrderedDict[tuple, _BackgroundLayer]" = OrderedDict()
+_measure_cache: dict[tuple, int] = {}
+MEASURE_CACHE_LIMIT = 512
 
 
 # --- 公共资源(进程内共享,避免每次重绘都开 DC) ---
@@ -69,6 +74,51 @@ def _raster() -> raster.Raster:
     return _shared_raster
 
 
+def theme_measure(values: Mapping[str, Any]) -> Callable[[str, int], int]:
+    """给布局用的测量函数:按主题字体量出「一行文字折行后的真实高度」。
+
+    布局层本身不碰 GDI,所以由这里注入。结果按 (文字, 最大宽度, 字体, 字号) 缓存 ——
+    `measure` 内部要 `CreateFontW`,每帧把每行重量一遍是白烧。
+    """
+
+    family = str(values.get("fontFamily") or "")
+    size = max(1, int(values.get("fontSize") or 20))
+    spacing = float(values.get("lineSpacing") or 1.35)
+    line_height = max(1, int(round(size * spacing)))
+
+    def one_line() -> int:
+        """字体自己的单行高度(不含用户调的行距)。"""
+        key = ("\x00one-line", family, size)
+        cached = _measure_cache.get(key)
+        if cached is None:
+            _width, height = _raster().measure("测Ag", family, size, 4096)
+            cached = int(height) if height else line_height
+            _measure_cache[key] = cached
+        return cached
+
+    def measure(text: str, max_width: int) -> int:
+        key = (text, int(max_width), family, size)
+        wrapped = _measure_cache.get(key)
+        if wrapped is None:
+            _width, height = _raster().measure(text, family, size, int(max_width))
+            wrapped = int(height)
+            if len(_measure_cache) >= MEASURE_CACHE_LIMIT:
+                _measure_cache.clear()
+            _measure_cache[key] = wrapped
+
+        # 实测高度是「字形本身」占的高度,不含用户调的行距。所以折成几行就补几份
+        # 「行距比自然行高高出来的那部分」—— 这样长台词排得开,`行距` 设置也仍然生效
+        # (直接把实测高度当行高会把行距吃掉)。
+        natural = one_line()
+        if natural <= 0:
+            return max(wrapped, line_height)
+        extra = max(0, line_height - natural)
+        visual_lines = max(1, int(round(wrapped / natural)))
+        return wrapped + extra * visual_lines
+
+    return measure
+
+
 def close_shared_raster() -> None:
     """关闭进程内共享的光栅器(退出路径调用);没建过就什么都不做,可重复调用。
 
@@ -76,6 +126,7 @@ def close_shared_raster() -> None:
     私有字段一旦改名就会**静默跳过收尾**。
     """
     global _shared_raster
+    _measure_cache.clear()
     if _shared_raster is not None:
         _shared_raster.close()
         _shared_raster = None
@@ -162,8 +213,12 @@ def _ring_coverage(
 def _role_color(
     values: Mapping[str, Any], box: layout.LineBox, current_segment: int, overall: int
 ) -> tuple[int, int, int, int]:
-    """按行角色取色;当前朗读句的原文行用高亮色。"""
-    if box.segment >= 0 and box.segment == current_segment and box.role == "source":
+    """按行角色取色;当前朗读句的**所有显示行**用高亮色。
+
+    不能只对 `role == "source"` 生效:只中文模式下画面上根本没有原文行,
+    那样高亮色就永远用不上 —— 而「当前句底色」允许留空,此时文字色是唯一的高亮提示。
+    """
+    if box.segment >= 0 and box.segment == current_segment:
         key = "highlightColor"
     elif box.role in ("translation", "notice"):
         key = "translationColor"
@@ -639,7 +694,7 @@ class CanvasWindow:
             return
         values = self._theme_values
         width = int(values.get("width", 460))
-        boxes = view.boxes(width)
+        boxes = view.boxes(width, theme_measure(values))
 
         # 滚动偏移只在 render 内维护,不写进 view
         self._offset = self.next_offset(boxes, int(view.current_segment), self._offset)

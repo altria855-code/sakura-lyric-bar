@@ -132,11 +132,45 @@ class LayoutBoxes:
     wrap_width: int
 
 
-def compute_layout(lines: list[Line], theme_values: Mapping[str, Any], width: int) -> LayoutBoxes:
+def _box_height(
+    measure: Any,
+    text: str,
+    wrap_width: int,
+    line_height: int,
+    role: str,
+) -> int:
+    """一行文字占多高。
+
+    传了 `measure` 就用它问真实高度 —— 长台词会在渲染时折成多行,按固定行高排
+    会让多出来的那几行压到下一句身上、或被栏底裁掉(实测:栏宽 300 时一句中文
+    实际 72px,而固定行高只给 24px)。没传(纯计算调用、旧测试)时退回固定行高。
+    """
+    if measure is not None:
+        try:
+            measured = measure(text, wrap_width)
+        except Exception:  # noqa: BLE001 — 测量失败不该让布局崩
+            measured = 0
+        if isinstance(measured, int) and not isinstance(measured, bool) and measured > 0:
+            return measured
+        return line_height
+    if role == "notice":
+        return max(1, int(round(line_height * _NOTICE_HEIGHT_RATIO)))
+    return line_height
+
+
+def compute_layout(
+    lines: list[Line],
+    theme_values: Mapping[str, Any],
+    width: int,
+    measure: Any = None,
+) -> LayoutBoxes:
     """把渲染行堆叠成盒模型,并算出视口高度与最大滚动量。
 
     `top` 从 0 起算、不含任何纵向留白 —— 视口高度就是纯文本高度,
     栏外留白由窗口层自己加(见 Task 5 的 `view_height + 40`)。
+
+    `measure(text, max_width) -> 高度(px)`:由调用方注入的字体度量。渲染路径会给,
+    纯计算/测试路径可以不给(不给就按固定行高排)。
     """
     values = theme_values if isinstance(theme_values, Mapping) else {}
 
@@ -152,9 +186,7 @@ def compute_layout(lines: list[Line], theme_values: Mapping[str, Any], width: in
     boxes: list[LineBox] = []
     top = 0
     for text, role, segment in _iter_lines(lines):
-        height = line_height
-        if role == "notice":
-            height = max(1, int(round(line_height * _NOTICE_HEIGHT_RATIO)))
+        height = _box_height(measure, text, wrap_width, line_height, role)
         boxes.append(LineBox(text=text, role=role, segment=segment, top=top, height=height))
         top += height
 
