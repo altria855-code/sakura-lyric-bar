@@ -39,15 +39,15 @@
 | 同目录存在 `pythonw.exe`(无控制台),与 `python.exe` 共用 `python312._pth` 与标准库 | 目录实测 |
 | 时间线助手条目载荷含 `segments: [{text, translation}]`;用户条目含 `text` | `core/app/core_host/history.py:_entry_mapping` |
 | TTS 播放逐句串行,每句一对 started/finished,句间无缝 | 用户 `data/logs/sakura-runtime.log` 实测 |
-| 宿主向插件广播 `sakura.host.tts.started` / `.ended`,载荷 `{playbackId, recordingId, outcome}`(**不含**文本或句序号) | `core/app/core_host/tts_boundary.py:_handle_playback_observe` |
-| `sakura.host.mobile.begin(plugin_id, character_id, text, artifact)` 把文本交给正常聊天通道 | `core/app/core_host/mobile_host.py:begin` |
+| 宿主向插件广播 `sakura.host.tts.started` / `.ended`,载荷含 `{playbackId, recordingId, outcome}`；可识别的录音还携带 `characterId/historyEntryId/segmentIndex` | `core/app/core_host/tts_boundary.py:_handle_playback_observe` |
+| `sakura.host.conversation.begin(character_id, text, artifact)` 把文本交给正常聊天通道 | `core/app/core_host/conversation_host.py:begin` |
 | 设置字段类型仅 string/password/boolean/integer/number/select/readonly/status/resource,**无取色器**;`placement: section_header` 仅 status 可用;select 选项上限 64 | `core/app/core_host/plugin_host_services.py` 字段校验 |
 | 宿主收录图标仅 49 个,含 `messages-square` | `desktop/frontend/core/icons.js` |
 
 **由此导出的两个关键结论:**
 
 - 浮窗必须是**插件自己启动的独立进程**,不能是宿主的窗口。
-- 「当前句高亮」的同步信号只能来自 **`tts.started` 事件的计数**(逐句串行已验证),不是估算。
+- 「当前句高亮」使用播放事件的段落身份；事件不携带正文，台词从 Timeline 按条目 ID 查询。
 
 ## 4. 总体架构
 
@@ -57,7 +57,7 @@ Sakura Core
       ├─ Host Service 消费
       │   ├─ context.on("sakura.host.chat.completed") ─→ timeline.read_since(cursor)
       │   ├─ context.on("sakura.host.tts.started"/".ended") ─→ 句序推进
-      │   ├─ sakura.host.mobile.begin/poll/cancel ─→ 发送用户文本
+      │   ├─ sakura.host.conversation.begin/poll/cancel ─→ 发送用户文本
       │   ├─ sakura.host.character.current() ─→ 当前角色
       │   ├─ sakura.host.settings ─→ 设置区块
       │   ├─ sakura.host.logging ─→ 宿主日志
@@ -141,26 +141,26 @@ Sakura Core
 3. 过滤出 `kind == "assistant"` 且 `characterId == 当前角色` 的最后一条 → 取 `payload.segments`。
 4. 同时,期间出现的 `kind == "human"` 条目 → 作为「你:…」显示。**去重规则**:浮窗自己发出的文本已在发送成功时立即显示,因此文本与最近一次本地发送相同、且时间间隔在 5 秒内的 human 条目不再重复显示;桌面端直接输入的 human 条目正常显示。
 5. 更新 `lastCursor`(失效时 `TIMELINE_CURSOR_INVALID` → 改用 `read_recent` 重建)。
-6. 推给浮窗 `{"type":"reply","segments":[…]}`;高亮复位到第 1 句。
+6. 推给浮窗 `{"type":"reply","segments":[…]}`。语音模式等待实际播放事件；估算模式从第 1 句开始。
 
 插件启动时用 `timeline.read_recent({limit: 1})` 初始化 `lastCursor`,不重放历史。
 
 ### 6.2 高亮同步
 
-- 计数源:`sakura.host.tts.started` 事件。一次回复从第 0 句开始,每收到一次 `started` 推进一句。
-- `outcome` 语义:`started` 推进;`stopped` 或 `failed` 时不推进也不回退,按当前句停留;整段播放结束后停留于最后一句。
-- `高亮跟随方式 = 跟随语音`(默认)时启用上述逻辑;`按字数估算` 时改为回复到达后按「每字 130ms + 句末 350ms 停顿」的定时器推进;`不高亮` 时始终不高亮。
-- 若长时间(超过估算总时长 + 5s)未收到任何 `tts.started`,自动退化到估算模式(用户可能关掉了 TTS)。
-- 角色切换或新一轮回复开始时,计数归零。
+- `sakura.host.tts.started` 提供 `characterId/historyEntryId/segmentIndex` 时，按当前角色校验后定位段落。`segmentIndex` 是 Timeline 原始段落的零基下标，空段落被过滤后仍保留索引映射。
+- 当前显示的是另一条回复时，调用 `timeline.get_entry({entryId})` 取得对应历史条目。只接收匹配当前角色、条目 ID 和助手类型的结果；查询期间切换角色或停用插件时丢弃旧结果。
+- `playbackId` 关联开始和终态。重复 started 不推进，旧播放的 ended 不清除新播放的高亮，已结束或被替换的播放不能再次激活。播放结束、停止或失败后清除高亮。
+- 缺少段落身份时不推测当前句。语音模式不自动退化为估算；`按字数估算` 使用每字 130ms 加句末 350ms，`不高亮` 始终不高亮。
+- 切换角色时清空显示并取消发送；新回复按条目身份区分，即使文字相同也不会沿用上一条回复的播放状态。
 
 ### 6.3 发送用户消息
 
-- 浮窗回车 → `{"type":"submit","text":"…"}` → 插件调 `mobile.begin(context.plugin_id, character_id, text, None)`。
-- 成功后进入轮询:`mobile.poll(plugin_id, jobId)`,间隔 500ms,总超时 120s;`cancel` 在浮窗关闭或插件停用时调用。
+- 浮窗回车 → `{"type":"submit","text":"…"}` → 插件调 `conversation.begin(character_id, text, None)`。
+- 成功后进入轮询:`conversation.poll(jobId)`,间隔 500ms,总超时 120s;`cancel` 在浮窗关闭或插件停用时调用。
 - 发送成功 → 推 `{"type":"user","text":"…"}`;失败 → 推 `{"type":"notice","text":"发送失败:…"}` 并记录日志。
-- 回复进行中再次回车 → 插件**不自己排队**:照常把文本交给宿主,由宿主判定是否可以受理。宿主拒绝时(错误码 `MOBILE_CHAT_UNAVAILABLE`)回推 `{"type":"notice","text":"还在回复中"}`。
+- 回复进行中再次回车 → 插件**不自己排队**:照常把文本交给宿主,由宿主判定是否可以受理。宿主拒绝时(错误码 `CHAT_EXECUTION_LIMIT_EXCEEDED`)回推 `{"type":"notice","text":"还在回复中"}`。
   (为什么不做本地排队:角色是否正在回复**只有宿主知道**,插件维护一份镜像状态会在切角色、取消、宿主重启等情况下失真;让权威方拒绝更可靠。)
-  发送等待超时(`MOBILE_SEND_TIMEOUT`)也提示「还在回复中」。
+  发送等待超时(`SEND_TIMEOUT`)也提示「还在回复中」。
 - `notice` 作为**末尾一行浅色小字**追加显示,5 秒后自动消失;它属于内容块的一部分(会随内容滚动、占用一个行位),不进入位置记忆。
 
 ### 6.4 进程间消息
@@ -267,7 +267,7 @@ Sakura Core
 | 浮窗进程启动失败 | `OVERLAY_SPAWN_FAILED`(浮窗自报启动失败时用同一个码) | 状态置「未运行」,设置页可点重启,日志 error |
 | 浮窗进程中途退出 | `OVERLAY_EXITED` | 检测 stdout EOF;状态置「未运行」;不自动重启(由用户点按钮);日志 warning |
 | 浮窗报告内部错误 | 由浮窗给出 | 转写宿主日志,浮窗保持运行 |
-| 发送被拒/超时 | `MOBILE_SEND_FAILED` | 浮窗显示「发送失败」,日志 error;不重试 |
+| 发送被拒/超时 | `SEND_FAILED` | 浮窗显示「发送失败」,日志 error;不重试 |
 | 时间线 cursor 失效 | `TIMELINE_CURSOR_INVALID` | 用 `read_recent` 重建 lastCursor 并重试一次;再失败仅记日志 |
 | 宿主事件丢失 | — | 事件是 best-effort。每轮回复都以 `read_since` 结果为准,不依赖事件本身携带内容 |
 | 高度或宽度异常 | — | 布局阶段夹取到合法范围 |
@@ -297,14 +297,14 @@ plugin/                        ← ZIP 的根即为本目录内容
 ├── view.py                    浮窗视图状态机:台词、高亮、提示、滚动
 ├── hostlink.py                插件侧:浮窗子进程管理与 IPC
 ├── timeline_source.py         插件侧:时间线读取与投影
-├── sender.py                  插件侧:mobile 发送与轮询
+├── sender.py                  插件侧:conversation 发送与轮询
 ├── settings_schema.py         设置区块描述符、字体枚举
 └── README.md                  安装、每项设置含义、已知限制、日志位置
 ```
 
 包外(不进入 ZIP):`tests/` 放单测,`tools/fake_overlay.py` 是供插件侧 IPC 测试使用的假浮窗。
 
-- `plugin.yaml`:`provides: []`(不发布 Service);`requires: [sakura.host.logging, sakura.host.settings, sakura.host.timeline, sakura.host.mobile, sakura.host.character]`;`presentation: {kind: extension, category: other, icon: messages-square}`;第三方插件默认 `enabled: false`。
+- `plugin.yaml`:`provides: []`(不发布 Service);`requires: [sakura.host.logging, sakura.host.settings, sakura.host.timeline, sakura.host.conversation, sakura.host.character]`;`presentation: {kind: extension, category: other, icon: messages-square}`;第三方插件默认 `enabled: false`。
 - 入口为零依赖实现,不提供 `requirements.txt`。
 - 代码不导入 `app.*` 与其他插件源码;两进程仅通过 JSON 行通信。
 - 浮窗进程用 `Path(sys.executable).with_name("pythonw.exe")` 定位解释器;缺失时回退 `sys.executable` 并以 `CREATE_NO_WINDOW` 启动。
@@ -316,7 +316,7 @@ plugin/                        ← ZIP 的根即为本目录内容
 
 - `overlay.py --selftest`:不建窗口,验证主题解析、颜色解析、分句布局计算(栏高/行数上限)、协议 JSON 编解码与边界。
 - `overlay.py --demo`:真实浮窗,内置示例台词与假逐句推进,供人工看外观与拖动。
-- 插件侧纯逻辑单测(stdlib `unittest`):事件计数推进、估算定时推进、`read_since` 结果到 `reply` 消息的投影、颜色与数值夹取、配置变更到主题投影。
+- 插件侧纯逻辑单测(stdlib `unittest`):精确播放身份、重复和过期事件隔离、估算定时推进、`read_since` 结果到 `reply` 消息的投影、颜色与数值夹取、配置变更到主题投影。
 - 协议测试:伪造浮窗(脚本读 stdin 写 stdout)验证插件侧 IPC 状态机,包括 EOF 与超长行。
 
 ### 10.2 上机验收清单
@@ -328,7 +328,7 @@ plugin/                        ← ZIP 的根即为本目录内容
 5. 拖动浮窗到副屏 → 关闭 Sakura 再启动 → 位置与屏幕保持。
 6. 鼠标移上去输入框出现 → 点击聚焦 → 用中文输入法打字 → 回车发送 → 浮窗显示「你:…」→ 角色回复并朗读。
 7. 回复进行中再次回车 → 提示「还在回复中」,草稿保留。
-8. 关掉 TTS 再触发一次回复 → 高亮退化为估算推进且不卡死。
+8. 关掉 TTS 再触发一次回复 → 显示台词且不高亮；切到「按字数估算」后按估算节奏推进。
 9. 停用插件 → 浮窗消失,任务管理器无残留进程。
 10. 停用插件时点「预览效果」等 Action 不报错崩溃。
 11. 用一个无边框全屏程序(如浏览器 F11 全屏)验证 `hideInFullscreen`:进入时浮窗自动隐藏,退出后原样恢复;关掉该开关则始终可见。
@@ -343,13 +343,12 @@ plugin/                        ← ZIP 的根即为本目录内容
 - 仅 Windows。
 - **游戏显示模式决定能否显示**:无边框窗口化 / 全屏窗口化下浮窗正常可见并跟读;**独占全屏(Exclusive Fullscreen)下所有普通窗口都画不上去**(桌面合成被绕过,歌词类软件同样如此)。不采用注入游戏渲染管线的方式(反作弊风险),因此独占全屏下唯一的做法是自动隐藏(见 `hideInFullscreen`)。
 - 常驻置顶窗口可能让部分独占全屏游戏无法进入全屏优化模式,`hideInFullscreen` 默认开启正是为此。
-- **用浮窗输入栏发送的消息,角色的回复不会被朗读**(只有字幕)—— 这是宿主架构的限制,不是插件缺陷。已核实:①回复在时间线里与桌面端**完全同构**(`kind=assistant`、`origin=chat`、`suppressTts=False`,都写进同一条时间线)②播放由**原生层(Rust)**发起(日志 `来源:rust`),而它只驱动**自己发起**的那次对话 —— 它拿自己发起方才知道的 `operationId` 去请求合成、播放、回报状态 ③插件走的 `sakura.host.mobile` 通道**拿不到 `operationId`**(`mobile.begin()` 只返回任务号),因此无法代替它驱动 ④官方的手机聊天插件走同一通道,能力清单里也没有任何语音条目。**对策**:打字时看字幕,想听声音在桌面端说;或向宿主作者建议让该通道的回复也能触发朗读。
 - **字体名来自注册表,未必能被 GDI 接受**:注册表值名常是**合并名**(如 `Microsoft YaHei & Microsoft YaHei UI`)或带样式词,而 GDI 的字体名是单一家族名 —— 传错名字时 GDI **静默回落到默认字体**(画面不变、无报错)。已做的处理:枚举时把合并名按 ` & ` 拆开;仍有个别名不保证可用。若发现选了字体却看不出变化,先确认该名字在别的程序里也能选中。
 - **任务栏设为「自动隐藏」时会误判**:此时 `rcWork == rcMonitor`,而 Windows 的最大化窗口会向外扩约 8px(不可见边框),于是**最大化任何普通窗口都会命中几何判据、浮窗被隐藏**。机制已实测确认。缓解:任务栏改成常显,或在设置里关掉「全屏应用时自动隐藏」。彻底区分可用 `GWL_STYLE & WS_MAXIMIZE` 配合有无标题栏/可调边框(`WS_CAPTION`/`WS_THICKFRAME`),但有反向风险(部分无边框游戏也带 `WS_MAXIMIZE`),故本次不做。
 - 输入框为单行,不支持 Shift+Enter 换行。
 - 颜色需手填十六进制(宿主设置页没有取色控件)。
 - 字体候选上限 64 个,新装字体后需重启插件才会出现。
-- 只显示最新一条回复,不提供历史回看。
+- 平时显示最新回复；历史朗读显示对应回复，浮窗不提供独立历史浏览。
 - 发送不排队。
 - 关闭 Sakura 后浮窗随即消失(浮窗依附于插件进程存活)。
 

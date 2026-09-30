@@ -2,36 +2,30 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any, Mapping, Sequence
 
 SENT_DEDUPE_SECONDS = 5.0
 
 
-def _fingerprint(payload: object) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True)
-
-
-def _segments_of(entry: Mapping[str, Any]) -> list[dict[str, str]] | None:
+def assistant_display(entry: Mapping[str, Any]) -> tuple[list[dict[str, str]], dict[int, int]]:
+    """保留原始段落索引到可见段落的映射，空段落不挤占字幕行。"""
     payload = entry.get("payload")
-    if not isinstance(payload, Mapping):
-        return None
-    raw = payload.get("segments")
-    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
-        return None
-    cleaned: list[dict[str, str]] = []
-    for segment in raw:
+    raw = payload.get("segments") if isinstance(payload, Mapping) else None
+    if not isinstance(raw, list):
+        return [], {}
+    segments: list[dict[str, str]] = []
+    indices: dict[int, int] = {}
+    for source_index, segment in enumerate(raw):
         if not isinstance(segment, Mapping):
             continue
         text = segment.get("text")
         translation = segment.get("translation")
-        cleaned.append(
-            {
-                "text": text.strip() if isinstance(text, str) else "",
-                "translation": translation.strip() if isinstance(translation, str) else "",
-            }
-        )
-    return [item for item in cleaned if item["text"] or item["translation"]]
+        value = {"text": text.strip() if isinstance(text, str) else "",
+                 "translation": translation.strip() if isinstance(translation, str) else ""}
+        if value["text"] or value["translation"]:
+            indices[source_index] = len(segments)
+            segments.append(value)
+    return segments, indices
 
 
 def _dedupe(text: str, sent_texts: Sequence[tuple[str, float]], now: float) -> bool:
@@ -52,6 +46,8 @@ def display_from_entries(
     """返回 {"segments", "user_text", "changed"}。"""
     segments: list[dict[str, str]] = []
     user_text = ""
+    entry_id = ""
+    segment_indices: dict[int, int] = {}
 
     if isinstance(entries, Sequence) and not isinstance(entries, (str, bytes)):
         for entry in entries:
@@ -62,9 +58,8 @@ def display_from_entries(
                 continue
             kind = entry.get("kind")
             if kind == "assistant":
-                found = _segments_of(entry)
-                if found is not None:
-                    segments = found
+                segments, segment_indices = assistant_display(entry)
+                entry_id = str(entry.get("entryId") or "")
             elif kind == "human":
                 payload = entry.get("payload")
                 if isinstance(payload, Mapping):
@@ -85,7 +80,8 @@ def display_from_entries(
     # (表示"本轮不推这一轴"),调用方空文本就不推 user 消息,浮窗自然保持原样。
 
     changed = (
-        _fingerprint(segments) != _fingerprint(previous_segments)
+        segments != previous_segments
         or user_text != previous_user_text
     )
-    return {"segments": segments, "user_text": user_text, "changed": changed}
+    return {"segments": segments, "user_text": user_text, "changed": changed,
+            "entry_id": entry_id, "segment_indices": segment_indices}

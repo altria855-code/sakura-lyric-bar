@@ -19,6 +19,7 @@
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import _path  # noqa: F401
@@ -134,18 +135,18 @@ class _Link:
         self.running = False
 
 
-class _Mobile:
+class _Conversation:
     def characters(self):
         return [{"id": "tian", "name": "天", "current": "true"}]
 
-    def begin(self, plugin_id, character_id, text, artifact):
+    def begin(self, character_id, text, artifact):
         return {"jobId": "j1"}
 
-    def poll(self, plugin_id, job_id):
-        # 同 test_plugin_wiring:宿主的字段名是 `status`(mobile_host.py:236-244)
+    def poll(self, job_id):
+        # 同 test_plugin_wiring:宿主的字段名是 `status`(conversation_host.py:poll)
         return {"status": "completed"}
 
-    def cancel(self, plugin_id, job_id):
+    def cancel(self, job_id):
         return None
 
 
@@ -171,7 +172,8 @@ class _RuntimeCase(unittest.TestCase):
         config = config if config is not None else _Config(values)
         runtime = plugin.LyricBarRuntime(
             context=None, plugin_dir="", log=_Logger(),
-            timeline=timeline, mobile=_Mobile(), config=config,
+            timeline=timeline, conversation=_Conversation(), config=config,
+            character=SimpleNamespace(current=lambda: {"id": "tian"}),
             overlay_link=link, clock=lambda: 100.0,
         )
         self.addCleanup(runtime.stop)
@@ -199,7 +201,7 @@ class CursorInitTests(_RuntimeCase):
         self.assertTrue(since, "必须走 read_since")
         self.assertEqual(since[-1]["cursor"], "recent-cursor",
                          "要用启动时钉住的 cursor;用事件自带的 cursor 会读不到这一轮")
-        self.assertEqual(runtime.overlay.sent[-1]["type"], "reply")
+        self.assertEqual(runtime.overlay.sent[-2]["type"], "reply")
 
     def test_first_empty_batch_pushes_nothing(self):
         # 契约 2 的意图:`segments` 初值是 `[]`,所以"还没有任何 assistant 条目"的首批
@@ -230,9 +232,8 @@ class ContractThreeTests(_RuntimeCase):
         runtime.start()
         runtime.timeline.entries = [_assistant([_segment("一"), _segment("二")])]
         runtime.on_host_event(CHAT_COMPLETED, {"characterId": "tian", "turnId": "t1", "cursor": "c9"})
-        runtime.on_host_event(TTS_STARTED, {"outcome": "started"})  # 第 0 句在播:已在 0,不推
-        runtime.on_host_event(TTS_STARTED, {"outcome": "started"})  # 第 1 句在播:真正推进,推一次
-        self.assertEqual(runtime.overlay.sent[-1], {"type": "current", "index": 1})
+        runtime.on_host_event(TTS_STARTED, {"outcome": "started", "playbackId": "play-1", "characterId": "tian", "historyEntryId": "e1", "segmentIndex": 0})  # 真正推进:推一次
+        self.assertEqual(runtime.overlay.sent[-1], {"type": "current", "index": 0})
 
         sent = list(runtime.overlay.sent)
         runtime.on_host_event(TTS_STARTED, {"outcome": "stopped"})  # on_tts_started 返回 None
@@ -256,7 +257,7 @@ class ContractFiveTests(_RuntimeCase):
         runtime.on_host_event(CHAT_COMPLETED, {"characterId": "tian", "turnId": "t1", "cursor": "c9"})
         since = [request for kind, request in runtime.timeline.requests if kind == "since"]
         self.assertEqual(len(since), 2, "hasMore=True 时必须接着往后读")
-        self.assertEqual(runtime.overlay.sent[-1],
+        self.assertEqual(runtime.overlay.sent[-2],
                          {"type": "reply", "segments": [_segment("最新句")]},
                          "推上屏的必须是**最新**那一页")
 
@@ -358,7 +359,7 @@ class _HostContext:
         self.logging = _Logger()
         self.settings = _Settings()
         self.timeline = _Timeline()
-        self.mobile = _Mobile()
+        self.conversation = _Conversation()
         self.events = []
         self.effects = []
         self._root = root
@@ -368,7 +369,8 @@ class _HostContext:
             "sakura.host.logging": self.logging,
             "sakura.host.settings": self.settings,
             "sakura.host.timeline": self.timeline,
-            "sakura.host.mobile": self.mobile,
+            "sakura.host.conversation": self.conversation,
+            "sakura.host.character": SimpleNamespace(current=lambda: {"id": "tian"}),
         }.get(key)
 
     def on(self, name, handler):
