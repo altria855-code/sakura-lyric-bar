@@ -20,13 +20,13 @@ A small always-on-top, draggable overlay window:
 
 ## Compatibility
 
-`1.1.0-rc.1` requires the host interfaces in **Sakura 1.3.0 or later**: `sakura.host.conversation`, `sakura.host.timeline.get_entry`, and playback events carrying `characterId/historyEntryId/segmentIndex`. See [Sakura #239](https://github.com/Rvosy/Sakura/pull/239) for the host changes. Sakura 1.2.1 does not provide this complete contract; upgrade the host before installing this plugin version.
+`1.1.0` requires the host interfaces in **Sakura 1.3.0 or later**: `sakura.host.conversation`, `sakura.host.timeline.get_entry`, and playback events carrying `characterId/historyEntryId/segmentIndex`. See [Sakura #239](https://github.com/Rvosy/Sakura/pull/239) for the host changes. Sakura 1.2.1 does not provide this complete contract; upgrade the host before installing this plugin version.
 
 Messages from the bar use the ordinary chat lane and the desktop's voice settings. Playing a history segment displays its original reply and highlights the actual segment. Legacy recordings without segment identity do not trigger highlighting; choose the timer mode if estimated timing is preferred.
 
 ## Install
 
-1. Download `字幕栏.zip` from [Releases](../../releases/latest);
+1. Download `sakura-lyric-bar-v*.zip` from [Releases](../../releases/latest);
 2. Sakura → **Settings → Plugins → More → Install from ZIP…**;
 3. Find "字幕栏" in the list and turn on **Enable**;
 4. Click **Apply** or **Save and close** in the settings footer.

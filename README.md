@@ -20,13 +20,13 @@
 
 ## 兼容要求
 
-`1.1.0-rc.1` 需要 Sakura **1.3.0 或更高版本**的宿主接口：`sakura.host.conversation`、`sakura.host.timeline.get_entry`，以及带 `characterId/historyEntryId/segmentIndex` 的播放事件。接口变更见 [Sakura #239](https://github.com/Rvosy/Sakura/pull/239)。Sakura 1.2.1 不具备这些完整接口，需先升级宿主再安装此插件版本。
+`1.1.0` 需要 Sakura **1.3.0 或更高版本**的宿主接口：`sakura.host.conversation`、`sakura.host.timeline.get_entry`，以及带 `characterId/historyEntryId/segmentIndex` 的播放事件。接口变更见 [Sakura #239](https://github.com/Rvosy/Sakura/pull/239)。Sakura 1.2.1 不具备这些完整接口，需先升级宿主再安装此插件版本。
 
 浮窗输入走普通聊天通道，回复由桌面按语音设置朗读。在 Sakura 中朗读历史段落时，浮窗会显示对应回复并高亮实际播放的段落。没有段落身份的旧录音不会触发高亮；需要按字数推进时，可选择「按字数估算」。
 
 ## 安装
 
-1. 到 [Releases](../../releases/latest) 下载 `字幕栏.zip`;
+1. 到 [Releases](../../releases/latest) 下载 `sakura-lyric-bar-v*.zip`;
 2. Sakura → **设置 → 插件 → 更多 → 从 ZIP 安装…**;
 3. 在插件列表里找到「字幕栏」,打开**启用**开关;
 4. 点设置页底栏的**应用**或**保存并关闭**。

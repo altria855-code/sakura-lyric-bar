@@ -3,7 +3,7 @@ id: local.sakura.lyric-bar
 name: 字幕栏
 author: 用户
 description: 桌面浮窗显示角色台词的当前句高亮,可拖动、可调外观,鼠标悬停即可打字发送。
-version: 1.1.0-rc.1
+version: 1.1.0
 entry: plugin:LyricBarPlugin
 enabled: false
 priority: 100
