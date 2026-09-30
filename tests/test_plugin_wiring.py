@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 
 import _path  # noqa: F401
@@ -55,7 +56,7 @@ class FakeConfig:
 class FakeHost:
     def __init__(self):
         self.timeline = FakeTimeline()
-        self.mobile = FakeMobile()
+        self.conversation = FakeConversation()
         self.events = []
 
     def emit(self, name, payload):
@@ -75,19 +76,19 @@ class FakeTimeline:
         return {"entries": self.entries, "nextCursor": "c1", "hasMore": False}
 
 
-class FakeMobile:
+class FakeConversation:
     def characters(self):
         return [{"id": "tian", "name": "天", "current": "true"}]
 
-    def begin(self, plugin_id, character_id, text, artifact):
+    def begin(self, character_id, text, artifact):
         return {"jobId": "j1"}
 
-    def poll(self, plugin_id, job_id):
-        # 字段名是宿主的真实字段 `status`(mobile_host.py:236-244),不是 `state` ——
+    def poll(self, job_id):
+        # 字段名是宿主的真实字段 `status`(conversation_host.py:poll),不是 `state` ——
         # 写成 `state` 的话,Sender 读不到 completed,发送线程会空转到 120 秒超时。
         return {"status": "completed"}
 
-    def cancel(self, plugin_id, job_id):
+    def cancel(self, job_id):
         return None
 
 
@@ -99,7 +100,8 @@ class RuntimeTests(unittest.TestCase):
             config = FakeConfig({"width": 500})
             runtime = plugin.LyricBarRuntime(
                 context=None, plugin_dir=folder, log=logger,
-                timeline=host.timeline, mobile=host.mobile, config=config,
+                timeline=host.timeline, conversation=host.conversation, config=config,
+                character=SimpleNamespace(current=lambda: {"id": "tian"}),
                 overlay_link=FakeLink(), clock=lambda: 100.0,
             )
             return runtime, host, logger, config, folder
@@ -119,7 +121,7 @@ class RuntimeTests(unittest.TestCase):
         ]
         runtime.on_host_event("sakura.host.chat.completed", {"characterId": "tian", "turnId": "t1", "cursor": "c9"})
         self.assertTrue(host.timeline.cursor_reads)
-        self.assertEqual(runtime.overlay.sent[-1]["type"], "reply")
+        self.assertEqual(runtime.overlay.sent[-2]["type"], "reply")
 
     def test_tts_started_advances_highlight(self):
         runtime, host, _logger, _config, _folder = self._make()
@@ -129,20 +131,20 @@ class RuntimeTests(unittest.TestCase):
              "payload": {"segments": [{"text": "一", "translation": ""}, {"text": "二", "translation": ""}]}},
         ]
         runtime.on_host_event("sakura.host.chat.completed", {"characterId": "tian", "turnId": "t1", "cursor": "c9"})
-        runtime.on_host_event("sakura.host.tts.started", {"outcome": "started"})
-        self.assertEqual(runtime.overlay.sent[-1], {"type": "current", "index": 1})
+        runtime.on_host_event("sakura.host.tts.started", {"outcome": "started", "playbackId": "play-1", "characterId": "tian", "historyEntryId": "e1", "segmentIndex": 0})
+        self.assertEqual(runtime.overlay.sent[-1], {"type": "current", "index": 0})
 
     def test_overlay_submit_sends_message(self):
         runtime, _host, _logger, _config, _folder = self._make()
         runtime.start()
         runtime.handle_overlay_message({"type": "submit", "text": "早安"})
-        self.assertTrue(runtime.mobile_calls)
-        self.assertEqual(runtime.mobile_calls[0][2], "早安")
+        self.assertTrue(runtime.conversation_calls)
+        self.assertEqual(runtime.conversation_calls[0][1], "早安")
 
     def test_send_failure_pushes_notice(self):
         runtime, _host, _logger, _config, _folder = self._make()
         runtime.start()
-        runtime.mobile_calls.clear()
+        runtime.conversation_calls.clear()
         runtime.fail_next_send = True
         runtime.handle_overlay_message({"type": "submit", "text": "早安"})
         self.assertEqual(runtime.overlay.sent[-1]["type"], "notice")

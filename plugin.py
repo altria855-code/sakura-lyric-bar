@@ -47,7 +47,7 @@ OUTBOX_LIMIT = 32  # 待发消息的队列上限,满了就丢这一条并记日�
 BUSY_NOTICE = "还在回复中"
 FAILED_NOTICE = "发送失败"
 NO_CHARACTER_NOTICE = "没有可用角色"
-BUSY_CODES = ("MOBILE_CHAT_UNAVAILABLE", "MOBILE_SEND_TIMEOUT")
+BUSY_CODES = ("CHAT_EXECUTION_LIMIT_EXCEEDED", "SEND_TIMEOUT")
 
 # 设置页「预览效果」用的内置示例台词(不改任何持久状态)
 DEMO_SEGMENTS = (
@@ -113,7 +113,7 @@ class LyricBarRuntime:
         plugin_dir: str,
         log: Any,
         timeline: Any = None,
-        mobile: Any = None,
+        conversation: Any = None,
         config: Any = None,
         overlay_link: Any = None,
         clock: Any = None,
@@ -133,7 +133,7 @@ class LyricBarRuntime:
         )
 
         self.timeline = timeline if timeline is not None else self._service("sakura.host.timeline")
-        self.mobile = mobile if mobile is not None else self._service("sakura.host.mobile")
+        self.conversation = conversation if conversation is not None else self._service("sakura.host.conversation")
         self.character = character if character is not None else self._service("sakura.host.character")
         self.config = config if config is not None else getattr(context, "config", None)
         # 名字必须是 `overlay`:用例按 `runtime.overlay.sent` 访问它(brief Step 3 点名)。
@@ -143,8 +143,8 @@ class LyricBarRuntime:
         # 发送器用它自己的单调钟算 120 秒超时:注入的 clock 在测试里可能是冻结的,
         # 拿它当超时基准会让等待永远不过期。
         self.sender = sender if sender is not None else (
-            sender_module.Sender(self.mobile, self.plugin_id, self.log)
-            if self.mobile is not None else None
+            sender_module.Sender(self.conversation, self.log)
+            if self.conversation is not None else None
         )
 
         self.theme: dict[str, Any] = theme.default_theme()
@@ -157,10 +157,15 @@ class LyricBarRuntime:
         self.segments: list[Any] = []
         self.user_text = ""  # 上一轮的用户轴
         self.character_id = ""
+        self.entry_id = ""
+        self.segment_indices: dict[int, int] = {}
+        self._playback_id = ""
+        self._retired_playbacks: set[str] = set()
+        self._event_lock = threading.RLock()
         self.sent_texts: list[tuple[str, float]] = []
 
         # 供测试使用的两个成员(正式路径上只在下面这些地方被读/追加,不改变行为)
-        self.mobile_calls: list[tuple[str, str, str]] = []
+        self.conversation_calls: list[tuple[str, str]] = []
         self.fail_next_send = False
 
         self._closed = False
@@ -207,68 +212,103 @@ class LyricBarRuntime:
             )
 
     def tick(self) -> None:
-        """高亮兜底推进(后台线程每秒一次):`timer` 模式与「TTS 一直没有事件」的退化靠它。"""
-        if self._closed:
-            return
-        self._advance(self.highlight.poll(self.clock()))
+        """后台检查角色变化，并推进显式选择的 timer 模式。"""
+        with self._event_lock:
+            if self._closed:
+                return
+            self._refresh_character()
+            self._advance(self.highlight.poll(self.clock()))
 
     # --- 宿主事件 ---
 
     def on_host_event(self, name: str, payload: dict) -> None:
-        """宿主事件入口(**宿主回调线程**):只做毫秒级的事,不阻塞、不抛。"""
-        if self._closed:
+        """宿主回调和定时推进共享同一份显示状态。"""
+        with self._event_lock:
+            if self._closed:
+                return
+            data = payload if isinstance(payload, dict) else {}
+            try:
+                self._refresh_character()
+                if name == "sakura.host.chat.completed":
+                    self._on_chat_completed(data)
+                elif name in ("sakura.host.tts.started", "sakura.host.tts.ended"):
+                    self._on_playback(data)
+            except Exception as error:
+                self.log.error(
+                    "处理宿主事件失败",
+                    fields={"operation": "host_event", "reason_code": "HOST_EVENT_FAILED",
+                            "error_type": type(error).__name__},
+                )
+
+    def _show_reply(self, entry_id: str, segments: list, indices: dict[int, int]) -> None:
+        self.entry_id = entry_id
+        self.segments = segments
+        self.segment_indices = indices
+        self._send(protocol.reply_message(segments))
+        self._advance(self.highlight.begin_turn(len(segments), self.clock(), segments))
+
+    def _retire_playback(self) -> None:
+        if self._playback_id:
+            self._retired_playbacks.add(self._playback_id)
+            self._playback_id = ""
+        self._advance(self.highlight.on_tts_ended())
+
+    def _on_playback(self, data: dict) -> None:
+        playback_id = _as_text(data.get("playbackId"))
+        if not playback_id:
             return
-        data = payload if isinstance(payload, dict) else {}
-        try:
-            if name == "sakura.host.chat.completed":
-                self._on_chat_completed(data)
-            elif name in ("sakura.host.tts.started", "sakura.host.tts.ended"):
-                outcome = data.get("outcome")
-                # `None` 表示"没变化"(不是清零):`on_tts_started` 只在真正推进时返回整数
-                self._advance(self.highlight.on_tts_started(outcome if isinstance(outcome, str) else "", self.clock()))
-        except Exception as error:  # noqa: BLE001 — 事件是 best-effort,不能让处理器抛出去
-            self.log.error(
-                "处理宿主事件失败",
-                fields={"operation": "host_event", "reason_code": "HOST_EVENT_FAILED",
-                        "error_type": type(error).__name__},
-            )
+        outcome = data.get("outcome")
+        if outcome in ("finished", "stopped", "failed"):
+            self._retired_playbacks.add(playback_id)
+            if playback_id == self._playback_id:
+                self._retire_playback()
+            return
+        if outcome != "started" or playback_id in self._retired_playbacks or playback_id == self._playback_id:
+            return
+        character_id = _as_text(data.get("characterId"))
+        entry_id = _as_text(data.get("historyEntryId"))
+        index = _as_int(data.get("segmentIndex"))
+        if not character_id or character_id != self.character_id or not entry_id or index is None or index < 0:
+            return
+        self._retire_playback()
+        if entry_id != self.entry_id:
+            result = self._invoke_timeline("get_entry", {"entryId": entry_id})
+            entry = result.get("entry") if isinstance(result, dict) else None
+            # 查询绑定当前角色；查询期间发生切换时也不能把旧内容送到浮窗。
+            self._refresh_character()
+            if self._closed or character_id != self.character_id or not isinstance(entry, dict):
+                return
+            if (entry.get("entryId") != entry_id or entry.get("characterId") != character_id
+                    or entry.get("kind") != "assistant"):
+                return
+            segments, indices = timeline_source.assistant_display(entry)
+            if index not in indices:
+                return
+            self._show_reply(entry_id, segments, indices)
+        visible_index = self.segment_indices.get(index)
+        if visible_index is None:
+            return
+        self._playback_id = playback_id
+        self._advance(self.highlight.on_tts_started(visible_index, self.clock()))
 
     def _on_chat_completed(self, payload: dict) -> None:
-        character_id = _as_text(payload.get("characterId"))
-        if character_id:
-            self.character_id = character_id
-        now = self.clock()
+        if _as_text(payload.get("characterId")) != self.character_id:
+            return
         entries = self._read_timeline(payload.get("cursor"))
+        self._refresh_character()
+        if self._closed or _as_text(payload.get("characterId")) != self.character_id:
+            return
         display = timeline_source.display_from_entries(
-            entries,
-            self.character_id,
-            self.sent_texts,
-            now,
-            previous_segments=self.segments,
-            previous_user_text=self.user_text,
+            entries, self.character_id, self.sent_texts, self.clock(),
+            previous_segments=self.segments, previous_user_text=self.user_text,
         )
-        segments = display["segments"]
+        entry_id = display["entry_id"]
+        if entry_id and (entry_id != self.entry_id or display["segments"] != self.segments):
+            self._retire_playback()
+            self._show_reply(entry_id, display["segments"], display["segment_indices"])
         user_text = display["user_text"]
-
-        # 两根轴**分别**判断,不能拿 `changed` 当总闸:它是两轴的析取,而且是比「有变化」
-        # 更弱的信号(空批 + 上一轮为 None 时它也是 True,此时根本没内容可推)。
-        # 只有用户轴变化时若推 reply + begin_turn,会把正在念到第 3 句的高亮打回第 1 句。
-        if segments != self.segments:
-            self.segments = segments
-            # 先 reply、后 current:浮窗收到 reply 时 `view.set_reply` 自己就把当前句置 0,
-            # 所以"重置到第 0 句"不用推 —— 推在 reply 之前反而会被它盖掉,而且 `syncMode=off`
-            # 的 -1 ⇒ None 清零也会被 set_reply 顶成"第 1 句高亮"。任务书 Step 3 写的是
-            # "reply → 推 current",与用例 `sent[-1] == "reply"` 冲突;按「测试即契约」取本顺序。
-            self._send(protocol.reply_message(segments))
-            index = self.highlight.begin_turn(len(segments), now, segments)
-            # begin_turn 只可能返回 0 或 -1:0 是浮窗收到 reply 时 `set_reply` 已经设好的
-            # 隐含值(不必推,-1 才是"该清零");-1 必须走 `_advance` 转成 None 推出去。
-            if index != 0:
-                self._advance(index)
         if user_text and user_text != self.user_text:
             self._send(protocol.user_message(user_text))
-        # 空文本表示"本轮不推这一轴"(浮窗保持原样),但**要**存下来供下一轮比较:
-        # 去重命中后 user_text 会从旧值变成 ""，下一轮同样的文本才不会被漏掉。
         self.user_text = user_text
 
     def _advance(self, index: object) -> None:
@@ -277,9 +317,7 @@ class LyricBarRuntime:
         `-1` 必须转成 `None` 再推:`view.set_current(-1)` 在 `segments` 非空时会被**夹到 0**
         (显示成"第 1 句高亮"而不是"不高亮"),只有 `None` 才是真正的清零。
 
-        高亮出现一次**倒退**(索引比上一次小)是设计行为:首个播放事件迟到时,高亮从退化路径
-        的末句回跳到事件计数位自纠一次,之后继续跟计数走;浮窗侧 `view.set_current` 只比较新旧值,
-        照常重绘,这里不需要任何特殊处理。
+        历史段落可以重新朗读，索引允许回到先前的位置。
         """
         if not isinstance(index, int) or isinstance(index, bool):
             return
@@ -289,7 +327,7 @@ class LyricBarRuntime:
 
     def handle_overlay_message(self, message: dict) -> None:
         """浮窗消息入口(**在浮窗的消息读线程上**):这里不许有任何阻塞等待。"""
-        if not isinstance(message, dict):
+        if self._closed or not isinstance(message, dict):
             return
         kind = message.get("type")
         try:
@@ -328,18 +366,18 @@ class LyricBarRuntime:
             self._send(protocol.notice_message(NO_CHARACTER_NOTICE))
             return
         # 测试台账:在**决定发送**时记下(不等发送线程真跑起来),它记的是"这批发送请求"
-        self.mobile_calls.append((self.plugin_id, character_id, value))
+        self.conversation_calls.append((character_id, value))
         if self.fail_next_send:
             # 测试钩子:直接当作发送失败并复位。同步处理,免得用例要等线程。
             self.fail_next_send = False
-            self._finish_send({"ok": False, "code": "MOBILE_SEND_FAILED"}, value)
+            self._finish_send({"ok": False, "code": "SEND_FAILED"}, value)
             return
         if self.sender is None:
             self.log.error(
                 "发送消息失败",
-                fields={"operation": "send_message", "reason_code": "MOBILE_SEND_FAILED"},
+                fields={"operation": "send_message", "reason_code": "SEND_FAILED"},
             )
-            self._finish_send({"ok": False, "code": "MOBILE_SEND_FAILED"}, value)
+            self._finish_send({"ok": False, "code": "SEND_FAILED"}, value)
             return
         self._spawn_send(character_id, value)
 
@@ -351,13 +389,13 @@ class LyricBarRuntime:
             try:
                 result = self.sender.send(character_id, text)
             except Exception as error:  # noqa: BLE001 — 发送线程只负责收尾,不许漏异常
-                result = {"ok": False, "code": "MOBILE_SEND_FAILED"}
+                result = {"ok": False, "code": "SEND_FAILED"}
                 self.log.error(
                     "发送消息失败",
-                    fields={"operation": "send_message", "reason_code": "MOBILE_SEND_FAILED",
+                    fields={"operation": "send_message", "reason_code": "SEND_FAILED",
                             "error_type": type(error).__name__},
                 )
-            self._finish_send(result, text)
+            self._finish_send(result, text, character_id)
 
         thread = threading.Thread(target=run, name="lyric-bar-send", daemon=True)
         with self._send_threads_lock:
@@ -365,8 +403,11 @@ class LyricBarRuntime:
             self._send_threads.append(thread)
         thread.start()
 
-    def _finish_send(self, result: object, text: str) -> None:
+    def _finish_send(self, result: object, text: str, character_id: str | None = None) -> None:
         if self._closed:
+            return
+        self._refresh_character()
+        if self._closed or (character_id is not None and character_id != self.character_id):
             return
         if isinstance(result, dict) and result.get("ok"):
             now = self.clock()
@@ -378,7 +419,7 @@ class LyricBarRuntime:
             self._send(protocol.user_message(text))
             return
         code = result.get("code") if isinstance(result, dict) else ""
-        code = code if isinstance(code, str) and code else "MOBILE_SEND_FAILED"
+        code = code if isinstance(code, str) and code else "SEND_FAILED"
         # 失败由 `sender` 自己记日志(同一任务只记一次),这里只管给浮窗的文案
         self._send(protocol.notice_message(BUSY_NOTICE if code in BUSY_CODES else FAILED_NOTICE))
 
@@ -441,9 +482,8 @@ class LyricBarRuntime:
 
     def _apply_theme(self, values: object) -> None:
         self.theme = theme.project_theme(values)
-        if self._replace_tracker(self.theme.get("syncMode")) and self.theme.get("syncMode") == "off":
-            # 切到「不高亮」:把屏幕上的高亮立刻清掉(必须在 theme 之前推,见下面的顺序)
-            self._advance(-1)
+        if self._replace_tracker(self.theme.get("syncMode")):
+            self._advance(self.highlight.begin_turn(len(self.segments), self.clock(), self.segments))
         self._send(protocol.theme_message(self.theme))  # 主题永远最后推(设置页按它热应用)
         if not self.theme.get("enabled", True):
             self._send(protocol.hide_message())
@@ -670,50 +710,38 @@ class LyricBarRuntime:
     # --- 角色 ---
 
     def _refresh_character(self) -> None:
-        """当前角色:先问 `sakura.host.character.current()`,不行再退回 `mobile.characters()`
-        里 `current == "true"` 的那一项;两个都拿不到就留空 —— 之后 submit 一律回 notice。"""
-        current_call = getattr(self.character, "current", None) if self.character is not None else None
-        if callable(current_call):
-            try:
-                current = current_call()
-            except Exception as error:  # noqa: BLE001 — 角色服务不可用不该拦住启动
-                current = None
-                self.log.warning(
-                    "读取当前角色失败",
-                    fields={"operation": "character_lookup", "reason_code": "CHARACTER_READ_FAILED",
-                            "error_type": type(error).__name__},
-                )
-            if isinstance(current, dict):
-                character_id = _as_text(current.get("id"))
-                if character_id:
-                    self.character_id = character_id
-                    return
+        with self._event_lock:
+            self._refresh_character_locked()
 
-        characters = None
-        if self.mobile is not None and callable(getattr(self.mobile, "characters", None)):
-            try:
-                characters = self.mobile.characters()
-            except Exception as error:  # noqa: BLE001
-                self.log.warning(
-                    "读取角色列表失败",
-                    fields={"operation": "character_lookup", "reason_code": "CHARACTER_READ_FAILED",
-                            "error_type": type(error).__name__},
-                )
-                characters = None
-        if isinstance(characters, list):
-            for item in characters:
-                if not isinstance(item, dict):
-                    continue
-                marker = item.get("current")
-                if marker is True or marker == "true":
-                    character_id = _as_text(item.get("id"))
-                    if character_id:
-                        self.character_id = character_id
-                        return
-        self.log.warning(
-            "没有取到当前角色",
-            fields={"operation": "character_lookup", "reason_code": "CHARACTER_UNAVAILABLE"},
-        )
+    def _refresh_character_locked(self) -> None:
+        """角色身份只从宿主读取，事件不能把当前角色改回旧角色。"""
+        current_call = getattr(self.character, "current", None)
+        try:
+            current = current_call() if callable(current_call) else None
+        except Exception as error:
+            self.log.warning(
+                "读取当前角色失败",
+                fields={"operation": "character_lookup", "reason_code": "CHARACTER_READ_FAILED",
+                        "error_type": type(error).__name__},
+            )
+            current = None
+        character_id = _as_text(current.get("id")) if isinstance(current, dict) else ""
+        if character_id == self.character_id:
+            return
+        previous = self.character_id
+        self.character_id = character_id
+        self.last_cursor = ""
+        self._retire_playback()
+        self.entry_id = ""
+        self.segment_indices = {}
+        self.segments = []
+        self.user_text = ""
+        self.sent_texts.clear()
+        self.highlight.begin_turn(0, self.clock())
+        if previous:
+            self._cancel_send()
+            self._send(protocol.reply_message([]))
+            self._send(protocol.user_message(""))
 
     # --- 宿主服务 ---
 
@@ -893,8 +921,7 @@ class LyricBarPlugin:
             context.on(name, _event_handler(runtime, name))
         context.config.on_change(runtime.handle_config_change)
 
-        # 高亮兜底推进:每 1 秒一次(宿主事件是 best-effort,少了它 timer 模式与
-        # 「TTS 一直没事件」的退化路径就完全不动)
+        # 检查角色变化并推进 timer 模式。
         stop_event = threading.Event()
 
         def poll_loop() -> None:
