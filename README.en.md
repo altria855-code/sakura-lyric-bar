@@ -20,7 +20,7 @@ A small always-on-top, draggable overlay window:
 
 ## Compatibility
 
-`1.1.0-rc.1` is a local prerelease. It requires a Sakura build with `sakura.host.conversation`, `sakura.host.timeline.get_entry`, and playback events carrying `characterId/historyEntryId/segmentIndex`. The published Sakura 1.2.1 release does not provide this complete contract.
+`1.1.0-rc.1` requires the host interfaces in **Sakura 1.3.0 or later**: `sakura.host.conversation`, `sakura.host.timeline.get_entry`, and playback events carrying `characterId/historyEntryId/segmentIndex`. See [Sakura #239](https://github.com/Rvosy/Sakura/pull/239) for the host changes. Sakura 1.2.1 does not provide this complete contract; upgrade the host before installing this plugin version.
 
 Messages from the bar use the ordinary chat lane and the desktop's voice settings. Playing a history segment displays its original reply and highlights the actual segment. Legacy recordings without segment identity do not trigger highlighting; choose the timer mode if estimated timing is preferred.
 

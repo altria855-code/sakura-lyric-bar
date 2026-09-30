@@ -20,7 +20,7 @@
 
 ## 兼容要求
 
-`1.1.0-rc.1` 是本地预发布版，需要包含通用用户对话和语音段落身份接口的 Sakura 构建：`sakura.host.conversation`、`sakura.host.timeline.get_entry`，以及带 `characterId/historyEntryId/segmentIndex` 的播放事件。已发布的 Sakura 1.2.1 不具备这些完整接口。
+`1.1.0-rc.1` 需要 Sakura **1.3.0 或更高版本**的宿主接口：`sakura.host.conversation`、`sakura.host.timeline.get_entry`，以及带 `characterId/historyEntryId/segmentIndex` 的播放事件。接口变更见 [Sakura #239](https://github.com/Rvosy/Sakura/pull/239)。Sakura 1.2.1 不具备这些完整接口，需先升级宿主再安装此插件版本。
 
 浮窗输入走普通聊天通道，回复由桌面按语音设置朗读。在 Sakura 中朗读历史段落时，浮窗会显示对应回复并高亮实际播放的段落。没有段落身份的旧录音不会触发高亮；需要按字数推进时，可选择「按字数估算」。
 
